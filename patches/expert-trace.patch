@@ -1,0 +1,103 @@
+diff --git a/ggml/src/ggml-cpu/ggml-cpu.c b/ggml/src/ggml-cpu/ggml-cpu.c
+index cd5c61a..f0b8313 100644
+--- a/ggml/src/ggml-cpu/ggml-cpu.c
++++ b/ggml/src/ggml-cpu/ggml-cpu.c
+@@ -1522,6 +1522,63 @@ static void * incr_ptr_aligned(void ** p, size_t size, size_t align) {
+     return ptr;
+ }
+ 
++// === moe-dissect: expert-activation trace =================================
++// Appends, for every MoE expert gather (ggml_mul_mat_id), the selected expert
++// ids per token to the file named by $OLLAMA_EXPERT_TRACE (one JSON object per
++// line). Disabled when the env var is unset, so a normal build/run is
++// unaffected. Every mul_mat_id in llama.cpp is a MoE gather whose src[2] is the
++// per-token selected_experts tensor (i32); the layer is parsed from its name
++// "ffn_moe_topk-<il>". A layer emits 2-3 lines (gate/up/down) with identical
++// expert content, which the harness dedups. The harness also slices the file by
++// byte offset to attribute lines to the request that produced them.
++#include <pthread.h>
++static FILE *          g_oet_fp   = NULL;
++static int             g_oet_init = 0;
++static pthread_mutex_t g_oet_mtx  = PTHREAD_MUTEX_INITIALIZER;
++
++void ollama_trace_experts(const struct ggml_compute_params * params,
++                          const struct ggml_tensor * dst,
++                          const struct ggml_tensor * ids) {
++    if (params->ith != 0) return;           // one writer per op
++    if (ids->type != GGML_TYPE_I32) return; // MoE routing ids are i32
++
++    pthread_mutex_lock(&g_oet_mtx);
++    if (!g_oet_init) {
++        g_oet_init = 1;
++        const char * path = getenv("OLLAMA_EXPERT_TRACE");
++        if (path && path[0]) g_oet_fp = fopen(path, "a");
++    }
++    FILE * fp = g_oet_fp;
++    if (!fp) { pthread_mutex_unlock(&g_oet_mtx); return; }
++
++    const char *  dname    = dst->name ? dst->name : "";
++    const char *  iname    = ids->name ? ids->name : "";
++    const int64_t n_used   = ids->ne[0];
++    const int64_t n_tokens = ids->ne[1];
++
++    int          layer = -1;
++    const char * dash  = strrchr(iname, '-');
++    if (dash && dash[1]) layer = atoi(dash + 1);
++    if (layer < 0) { const char * d2 = strrchr(dname, '-'); if (d2 && d2[1]) layer = atoi(d2 + 1); }
++
++    fprintf(fp, "{\"layer\":%d,\"name\":\"%s\",\"n_used\":%lld,\"n_tokens\":%lld,\"experts\":[",
++            layer, dname, (long long) n_used, (long long) n_tokens);
++    for (int64_t t = 0; t < n_tokens; ++t) {
++        const int32_t * row = (const int32_t *)((const char *) ids->data + t * ids->nb[1]);
++        if (t) fputc(',', fp);
++        fputc('[', fp);
++        for (int64_t e = 0; e < n_used; ++e) {
++            if (e) fputc(',', fp);
++            fprintf(fp, "%d", row[e]);
++        }
++        fputc(']', fp);
++    }
++    fprintf(fp, "]}\n");
++    fflush(fp);
++    pthread_mutex_unlock(&g_oet_mtx);
++}
++// === end moe-dissect ======================================================
++
+ static void ggml_compute_forward_mul_mat_id(
+         const struct ggml_compute_params * params,
+               struct ggml_tensor * dst) {
+@@ -1556,6 +1613,8 @@ static void ggml_compute_forward_mul_mat_id(
+     const int n_ids = ids->ne[0]; // n_expert_used
+     const int n_as  = ne02;       // n_expert
+ 
++    ollama_trace_experts(params, dst, ids); // moe-dissect
++
+     void * wdata_cur = params->wdata;
+ 
+     if (src1->type != vec_dot_type) {
+diff --git a/ggml/src/ggml-cpu/repack.cpp b/ggml/src/ggml-cpu/repack.cpp
+index f18758f..2c0ef00 100644
+--- a/ggml/src/ggml-cpu/repack.cpp
++++ b/ggml/src/ggml-cpu/repack.cpp
+@@ -22,6 +22,10 @@
+ #pragma GCC diagnostic ignored "-Woverlength-strings"
+ #endif
+ 
++// moe-dissect: defined in ggml-cpu.c; traces MoE expert selection.
++extern "C" void ollama_trace_experts(const ggml_compute_params *,
++                                     const ggml_tensor *, const ggml_tensor *);
++
+ #define UNUSED GGML_UNUSED
+ 
+ static inline int nearest_int(float fval) {
+@@ -4389,6 +4393,10 @@ template <typename BLOC_TYPE, int64_t INTER_SIZE, int64_t NB_COLS, ggml_type PAR
+         const ggml_tensor * ids  = op->src[2];
+         ggml_tensor *       dst  = op;
+ 
++        // moe-dissect: trace expert selection for repacked-weight MoE gathers,
++        // which bypass the ggml-cpu.c mul_mat_id kernel.
++        ollama_trace_experts(params, op, ids);
++
+         GGML_TENSOR_BINARY_OP_LOCALS
+ 
+         const int ith = params->ith;
