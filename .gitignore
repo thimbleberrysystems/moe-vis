@@ -12,6 +12,9 @@ harness/benchmarks.json
 harness/*.png
 harness/*.csv
 
+# pruned model artifacts (large)
+harness/*.gguf
+
 # local env
 env.sh
 

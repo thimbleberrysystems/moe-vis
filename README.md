@@ -102,6 +102,7 @@ are the exception.)
 | `run_trace.py` | Drive the patched server (serialized, `think:false`), slice the trace by byte offset per request, pair experts with gating weights, **split prefill vs generation**, validate captured layers == `block_count`. → `activations.npz` |
 | `expert_atlas.py` | Embed experts by co-activation similarity (t-SNE) → the Atlas. |
 | `ablate_validate.py` + `plot_ablation.py` | **Causal test**: ablate each task's top experts, measure task-specific output divergence. |
+| `prune_export.py` | Slice a task's least-used experts out of the GGUF → a smaller model (experimental). |
 
 ### 3. Methodology (what makes it trustworthy)
 
@@ -233,6 +234,36 @@ routing statistics.
 `run_trace.py`: `MOE_MODEL`, `MOE_NUM_PREDICT`, `MOE_LIMIT`, `MOE_PORT`, `OLLAMA_BIN`.
 `expert_atlas.py`: `MOE_SHARED_T` (specialization threshold for "shared").
 `ablate_validate.py`: `MOE_ABLATE_N`, `MOE_EVAL_N`, `MOE_EVAL_TOK`.
+
+## Physically shrinking the model (experimental)
+
+`prune_export.py` turns the routing data into a smaller model. For a target task
+it keeps each layer's top-K experts and slices the rest out of the GGUF — the
+stacked expert tensors *and* the router — and lowers `expert_count` to K. Whole
+experts are contiguous and quantized independently, so the cut is byte-exact (no
+requantization).
+
+```bash
+python prune_export.py code 96                  # keep top 96/128 coding experts/layer
+printf 'FROM %s/pruned-code-k96.gguf\n' "$PWD" > Modelfile
+ollama create qwen3-code -f Modelfile
+ollama run qwen3-code 'write a quicksort in python'
+```
+
+On qwen3-30b this produced a **14.2 GB** model (from 18.6 GB, **25% smaller**) that
+loads in stock ollama and still writes correct code.
+
+Honest caveats:
+- `expert_count` is global, so every layer drops the same K. Truly *lossless*
+  removal is tiny (~1.6% for coding, ~0% for general — some layer always uses all
+  128 experts on the sample). Real savings come from dropping the *least-used*
+  (not just unused) experts, which costs some quality.
+- K=96 (~25% smaller) keeps ~99% of coding's routing and stays coherent; K=64
+  (~50%) keeps ~94% and noticeably degrades; below that needs a finetune/distill
+  "healing" step. (A purpose-built small coder like `qwen2.5-coder` is often a
+  better quality-per-GB path than aggressive pruning.)
+- "Least used" is measured over a sample, so a removed expert could rarely be
+  wanted on unseen inputs — handled gracefully (the router simply can't pick it).
 
 ## Caveats
 
