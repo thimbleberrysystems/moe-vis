@@ -250,6 +250,16 @@ ollama create qwen3-code -f Modelfile
 ollama run qwen3-code 'write a quicksort in python'
 ```
 
+The first argument selects which task(s) to optimize the kept experts for, matched
+by category-name prefix:
+
+```bash
+python prune_export.py code 96          # keep coding
+python prune_export.py code,math 96     # keep a union of coding + math
+python prune_export.py sci_physics 96   # keep one specific category
+python prune_export.py drop:lang 110    # keep everything EXCEPT language
+```
+
 On qwen3-30b this produced a **14.2 GB** model (from 18.6 GB, **25% smaller**) that
 loads in stock ollama and still writes correct code.
 

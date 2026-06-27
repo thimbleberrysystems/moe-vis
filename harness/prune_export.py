@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Physically prune a MoE GGUF down to a task's most-used experts.
+"""Physically prune a MoE GGUF down to chosen task(s)' most-used experts.
 
 Produces a NEW, smaller .gguf: for every layer it keeps the top-K experts (by the
-target task's gate-weighted usage from activations.npz) and drops the rest,
+selected tasks' gate-weighted usage from activations.npz) and drops the rest,
 slicing them out of the stacked expert tensors and the router, and lowering
 `<arch>.expert_count` to K. Whole experts are contiguous in the file, so the
 quantized blocks are sliced byte-exact with no requantization.
@@ -12,8 +12,17 @@ experts per layer, same count). K is the knob:
   K=126  ~lossless for coding (~1.6% smaller)   K=96  ~25% smaller, ~99% routing kept
   K=64   ~50% smaller, ~94% kept (quality dips)  smaller K needs healing/finetune.
 
-Usage:  python prune_export.py <task-prefix> <K> [out.gguf]
+The first argument SELECTS which task(s) to optimize for (matched by category-name
+prefix, so families or specific categories both work):
+  code                keep coding's experts
+  code,math           keep a UNION of coding + math experts
+  sci_physics         keep one specific category
+  drop:lang           keep everything EXCEPT language (prune that family)
+  drop:lang,neutral   prune several
+
+Usage:  python prune_export.py <spec> <K> [out.gguf]
         python prune_export.py code 96
+        python prune_export.py drop:lang 110
 """
 import glob
 import os
@@ -31,13 +40,24 @@ def source_gguf():
     return max(blobs, key=os.path.getsize)            # the model weights = largest blob
 
 
-def keep_sets(task, K):
-    """Per-layer sorted indices of the K experts to KEEP for `task`."""
+def select_requests(spec, cats):
+    """Resolve a spec ('code', 'code,math', 'drop:lang') to the request indices
+    whose usage the kept experts are optimized for."""
+    drop = spec.startswith("drop:")
+    body = spec[len("drop:"):] if drop else spec
+    prefixes = [p for p in body.split(",") if p]
+    def matches(x):
+        return any(x.startswith(p) for p in prefixes)
+    return [i for i, x in enumerate(cats) if (matches(x) != drop)]
+
+
+def keep_sets(spec, K):
+    """Per-layer sorted indices of the K experts to KEEP for `spec`."""
     d = np.load(os.path.join(HERE, "activations.npz"), allow_pickle=True)
     c = d["counts_gen"]; cats = [str(x) for x in d["categories"]]
-    reqs = [i for i, x in enumerate(cats) if x.startswith(task)]
+    reqs = select_requests(spec, cats)
     if not reqs:
-        sys.exit(f"no categories match prefix '{task}'; have {sorted(set(cats))}")
+        sys.exit(f"spec '{spec}' selected no categories; have {sorted(set(cats))}")
     use = c[reqs].sum(0)                              # (L, E)
     L, E = use.shape
     if not (0 < K <= E):
@@ -60,13 +80,14 @@ def moe_layer(name):
 def main():
     if len(sys.argv) < 3:
         sys.exit(__doc__)
-    task = sys.argv[1]; K = int(sys.argv[2])
-    out = sys.argv[3] if len(sys.argv) > 3 else os.path.join(HERE, f"pruned-{task}-k{K}.gguf")
+    spec = sys.argv[1]; K = int(sys.argv[2])
+    tag = re.sub(r"[^a-z0-9]+", "-", spec.lower()).strip("-")   # safe for file/model names
+    out = sys.argv[3] if len(sys.argv) > 3 else os.path.join(HERE, f"pruned-{tag}-k{K}.gguf")
 
-    keep, L, E, nreq = keep_sets(task, K)
+    keep, L, E, nreq = keep_sets(spec, K)
     src = source_gguf()
     print(f"source: {src} ({os.path.getsize(src)/1e9:.1f} GB)")
-    print(f"task '{task}' ({nreq} requests): keep top {K}/{E} experts per layer "
+    print(f"spec '{spec}' ({nreq} requests): keep top {K}/{E} experts per layer "
           f"-> {L} layers, expert_count {E}->{K}")
 
     r = gguf.GGUFReader(src)
@@ -115,10 +136,11 @@ def main():
     print(f"sliced {sliced} expert/router tensors (expect {L*4})")
     print(f"wrote {out} ({os.path.getsize(out)/1e9:.1f} GB, "
           f"{100*(1-os.path.getsize(out)/os.path.getsize(src)):.1f}% smaller)")
+    name = f"{arch}-{tag}-k{K}"
     print("\nimport + run:")
     print(f"  printf 'FROM {out}\\n' > /tmp/Modelfile.pruned")
-    print(f"  ollama create {arch}-{task}-k{K} -f /tmp/Modelfile.pruned")
-    print(f"  ollama run {arch}-{task}-k{K} 'write a python function to reverse a string'")
+    print(f"  ollama create {name} -f /tmp/Modelfile.pruned")
+    print(f"  ollama run {name} 'write a python function to reverse a string'")
 
 
 if __name__ == "__main__":
