@@ -88,8 +88,22 @@ token:
 
 ### 0. Prerequisites
 
-CPU is enough (no GPU). Need **Go ≥ 1.26**, **CMake ≥ 3.24**, a C/C++ compiler,
-**git**, **Python 3.10+**, ~30 GB disk, internet.
+- **Runs on CPU** — and the trace *requires* CPU execution. It hooks ggml's CPU
+  kernels, so the harness forces `num_gpu: 0`; on a CUDA/Metal machine the experts
+  would otherwise run on the GPU and bypass the trace entirely. (`run_trace.py`
+  warns if captured layers ≠ the model's layer count, which catches this.)
+- **Go ≥ 1.26**, **CMake ≥ 3.24**, a C/C++ compiler, **git**, **Python 3.10+**.
+- **~30 GB disk** and **~24 GB free RAM** for `qwen3:30b-a3b` (CPU inference).
+  Low on RAM? Use a smaller MoE — `ollama pull granite3.1-moe:3b` (~2 GB) and set
+  `MOE_MODEL=granite3.1-moe:3b`.
+- **Internet** — the build fetches llama.cpp, and `fetch_benchmarks.py` pulls
+  prompts live from the HuggingFace datasets-server.
+
+Reproducibility notes: generation is deterministic (`temperature 0`, `seed 0`,
+`num_gpu 0`) and the Atlas embedding is seeded (`random_state 0`), so a given
+build + model reproduces the same `activations.npz` and figures. The patch is
+pinned to one llama.cpp revision (below); a different ollama version needs the
+patch regenerated.
 
 ```bash
 python3 -m venv venv && ./venv/bin/pip install cmake ninja numpy scipy scikit-learn matplotlib

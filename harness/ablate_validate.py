@@ -52,7 +52,8 @@ def wait_ready(timeout=180):
 
 def gen(prompt):
     body = json.dumps({"model": MODEL, "prompt": prompt, "stream": False, "think": True,
-                       "options": {"temperature": 0, "num_predict": N_TOK, "seed": 0}}).encode()
+                       "options": {"temperature": 0, "num_predict": N_TOK, "seed": 0,
+                                   "num_gpu": 0}}).encode()
     req = urllib.request.Request(f"http://{HOST}/api/generate", data=body,
                                  headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=600) as r:

@@ -74,7 +74,9 @@ def generate(prompt):
     return api("generate", {
         "model": MODEL, "prompt": prompt, "stream": False, "think": False,
         "keep_alive": "30m",
-        "options": {"temperature": 0, "num_predict": NUM_PREDICT, "seed": 0},
+        # num_gpu:0 forces CPU execution so the ggml CPU hook sees every MoE op;
+        # on a GPU/Metal machine the experts would otherwise bypass the trace.
+        "options": {"temperature": 0, "num_predict": NUM_PREDICT, "seed": 0, "num_gpu": 0},
     })
 
 
