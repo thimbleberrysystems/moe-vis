@@ -39,8 +39,12 @@ def fetch_rows(dataset, config, split, length, offset=0):
 
 def build_math():
     rows = fetch_rows("openai/gsm8k", "main", "test", N_PER_CATEGORY)
-    return [{"id": f"gsm8k-{i}", "prompt": r["question"].strip()}
-            for i, r in enumerate(rows)]
+    out = []
+    for i, r in enumerate(rows):
+        gold = r["answer"].split("####")[-1].strip().replace(",", "")
+        out.append({"id": f"gsm8k-{i}", "prompt": r["question"].strip(),
+                    "answer": gold})  # final numeric answer
+    return out
 
 
 def build_code():
@@ -59,8 +63,27 @@ def build_knowledge():
         opts = "\n".join(f"{letters[j]}. {c}" for j, c in enumerate(choices))
         prompt = (f"Answer the multiple-choice question. Reply with the letter "
                   f"and a brief justification.\n\nQuestion: {r['question']}\n{opts}\nAnswer:")
-        out.append({"id": f"mmlu-{i}", "prompt": prompt})
+        out.append({"id": f"mmlu-{i}", "prompt": prompt,
+                    "answer": letters[int(r["answer"])]})  # gold letter
     return out
+
+
+def build_neutral():
+    """Content-free control prompts: generic continuation/chit-chat with no
+    clear task, used as a routing baseline to contrast against the task categories."""
+    seeds = [
+        "Tell me a little about yourself.",
+        "Continue this text: The morning was quiet and",
+        "Write a few sentences about a walk in the park.",
+        "What are some things people enjoy on weekends?",
+        "Describe an ordinary kitchen table.",
+        "Say something interesting.",
+        "Continue: Once upon a time there was",
+        "Talk about the colour blue.",
+        "Describe what a city sounds like at night.",
+        "Tell me about clouds.",
+    ]
+    return [{"id": f"neutral-{i}", "prompt": s} for i, s in enumerate(seeds)]
 
 
 def build_language():
@@ -79,6 +102,7 @@ def main():
         "code": build_code,
         "knowledge": build_knowledge,
         "language": build_language,
+        "neutral": build_neutral,   # content-free routing baseline (control)
     }
     result = {}
     for cat, fn in builders.items():

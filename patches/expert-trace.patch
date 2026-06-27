@@ -1,8 +1,8 @@
 diff --git a/ggml/src/ggml-cpu/ggml-cpu.c b/ggml/src/ggml-cpu/ggml-cpu.c
-index cd5c61a..f0b8313 100644
+index cd5c61a..544cfea 100644
 --- a/ggml/src/ggml-cpu/ggml-cpu.c
 +++ b/ggml/src/ggml-cpu/ggml-cpu.c
-@@ -1522,6 +1522,63 @@ static void * incr_ptr_aligned(void ** p, size_t size, size_t align) {
+@@ -1522,6 +1522,157 @@ static void * incr_ptr_aligned(void ** p, size_t size, size_t align) {
      return ptr;
  }
  
@@ -61,12 +61,106 @@ index cd5c61a..f0b8313 100644
 +    fflush(fp);
 +    pthread_mutex_unlock(&g_oet_mtx);
 +}
++
++// ---- routing-weight capture + expert ablation ----------------------------
++// These run from a single post-op hook in ggml_compute_forward (the generic CPU
++// dispatcher), so they see the non-repacked routing tensors:
++//   * "ffn_moe_weights-<il>"  (gating weight of each selected expert, f32)
++//   * "ffn_moe_probs[_biased]-<il>" (selection scores, masked for ablation)
++#define OET_MAX_LAYERS 256
++#define OET_MAX_EXPERTS 1024
++static unsigned char g_oet_ablate[OET_MAX_LAYERS][OET_MAX_EXPERTS];
++static int           g_oet_ablate_any  = 0;
++static int           g_oet_ablate_init = 0;
++
++// Parse $OLLAMA_ABLATE_EXPERTS = "layer:expert,layer:expert,..." once.
++static void oet_ablate_parse(void) {
++    g_oet_ablate_init = 1;
++    const char * s = getenv("OLLAMA_ABLATE_EXPERTS");
++    if (!s || !s[0]) return;
++    while (*s) {
++        while (*s == ',' || *s == ' ') s++;
++        if (!*s) break;
++        int L = atoi(s);
++        const char * colon = strchr(s, ':');
++        if (!colon) break;
++        int E = atoi(colon + 1);
++        if (L >= 0 && L < OET_MAX_LAYERS && E >= 0 && E < OET_MAX_EXPERTS) {
++            g_oet_ablate[L][E] = 1;
++            g_oet_ablate_any = 1;
++        }
++        const char * comma = strchr(s, ',');
++        if (!comma) break;
++        s = comma + 1;
++    }
++}
++
++static int oet_layer_from_name(const char * name) {
++    const char * dash = name ? strrchr(name, '-') : NULL;
++    return (dash && dash[1]) ? atoi(dash + 1) : -1;
++}
++
++void ollama_moe_post(const struct ggml_compute_params * params,
++                     struct ggml_tensor * tensor) {
++    if (params->ith != 0) return;
++    const char * name = tensor->name;
++    if (!name || name[0] == '\0') return;
++
++    // --- ablation: zero out selected scores for ablated experts -------------
++    if (!g_oet_ablate_init) {
++        pthread_mutex_lock(&g_oet_mtx);
++        if (!g_oet_ablate_init) oet_ablate_parse();
++        pthread_mutex_unlock(&g_oet_mtx);
++    }
++    if (g_oet_ablate_any && tensor->type == GGML_TYPE_F32 &&
++        strncmp(name, "ffn_moe_probs", 13) == 0) {
++        int L = oet_layer_from_name(name);
++        if (L >= 0 && L < OET_MAX_LAYERS) {
++            const int64_t n_expert = tensor->ne[0];
++            const int64_t n_tokens = tensor->ne[1];
++            for (int64_t t = 0; t < n_tokens; ++t) {
++                float * row = (float *)((char *) tensor->data + t * tensor->nb[1]);
++                for (int64_t e = 0; e < n_expert && e < OET_MAX_EXPERTS; ++e) {
++                    if (g_oet_ablate[L][e]) row[e] = -INFINITY;
++                }
++            }
++        }
++    }
++
++    // --- routing-weight capture --------------------------------------------
++    // "ffn_moe_weights-<il>" only (not _softmax/_sum/_biased): the per-selected
++    // expert gating weight, shape [1, n_expert_used, n_tokens]. Paired with the
++    // expert ids by the harness using (layer, order).
++    if (g_oet_fp && tensor->type == GGML_TYPE_F32 &&
++        strncmp(name, "ffn_moe_weights", 15) == 0 && name[15] == '-') {
++        const int64_t n_used   = tensor->ne[1];
++        const int64_t n_tokens = tensor->ne[2];
++        int L = oet_layer_from_name(name);
++        pthread_mutex_lock(&g_oet_mtx);
++        FILE * fp = g_oet_fp;
++        fprintf(fp, "{\"wlayer\":%d,\"n_used\":%lld,\"n_tokens\":%lld,\"weights\":[",
++                L, (long long) n_used, (long long) n_tokens);
++        for (int64_t t = 0; t < n_tokens; ++t) {
++            const float * w = (const float *)((const char *) tensor->data + t * tensor->nb[2]);
++            if (t) fputc(',', fp);
++            fputc('[', fp);
++            for (int64_t e = 0; e < n_used; ++e) {
++                if (e) fputc(',', fp);
++                fprintf(fp, "%.6g", (double) w[e * (tensor->nb[1] / sizeof(float))]);
++            }
++            fputc(']', fp);
++        }
++        fprintf(fp, "]}\n");
++        fflush(fp);
++        pthread_mutex_unlock(&g_oet_mtx);
++    }
++}
 +// === end moe-dissect ======================================================
 +
  static void ggml_compute_forward_mul_mat_id(
          const struct ggml_compute_params * params,
                struct ggml_tensor * dst) {
-@@ -1556,6 +1613,8 @@ static void ggml_compute_forward_mul_mat_id(
+@@ -1556,6 +1707,8 @@ static void ggml_compute_forward_mul_mat_id(
      const int n_ids = ids->ne[0]; // n_expert_used
      const int n_as  = ne02;       // n_expert
  
@@ -75,6 +169,15 @@ index cd5c61a..f0b8313 100644
      void * wdata_cur = params->wdata;
  
      if (src1->type != vec_dot_type) {
+@@ -2112,6 +2265,8 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
+                 GGML_ABORT("fatal error");
+             }
+     }
++
++    ollama_moe_post(params, tensor); // moe-dissect: weights capture + ablation
+ }
+ 
+ // Android's libc implementation "bionic" does not support setting affinity
 diff --git a/ggml/src/ggml-cpu/repack.cpp b/ggml/src/ggml-cpu/repack.cpp
 index f18758f..2c0ef00 100644
 --- a/ggml/src/ggml-cpu/repack.cpp

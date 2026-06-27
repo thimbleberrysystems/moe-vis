@@ -1,65 +1,73 @@
-# moe-vis — MoE expert-activation tracing & heatmaps
+# moe-vis — MoE expert-activation tracing, heatmaps & causal validation
 
 See **which experts ("sub-models") a Mixture-of-Experts LLM activates**, broken
-down by benchmark task type, using a custom-patched [Ollama](https://ollama.com)
-build — then render heatmaps.
+down by task type, using a custom-patched [Ollama](https://ollama.com) build —
+then quantify, visualize, and **causally validate** the specialization.
 
-The reference run traces **`qwen3:30b-a3b`** (qwen3moe: 48 layers, 128 experts,
-top-8 routing) on **CPU**, across four task categories (math, code, knowledge,
-language).
+Reference model: **`qwen3:30b-a3b`** (qwen3moe: 48 layers, 128 experts, top-8
+routing) on **CPU**, across five prompt categories (math, code, knowledge,
+language, and a content-free *neutral* control).
 
-## Example output
+## Headline result
 
-Expert specialization per task — `log2(task usage / overall usage)`; red = an
-expert this task prefers, blue = one it avoids:
+Each significantly-specialized `(layer, expert)` expert, clustered by its
+across-task routing profile. Experts partition cleanly into per-task blocks
+(cluster purity ≈ 1.0) — red = task-preferred:
 
-![specialization](results/heatmap_specialization.png)
+![clustered](results/heatmap_clustered.png)
 
-Per-task layer × expert routing:
+Per-task `(layer × expert)` specialization (FDR-masked) and task overlap:
 
-![layers](results/heatmap_layers.png)
-
-Stable, reproducible specialization (consistent across run sizes), e.g.:
-
-| task | top task-preferred experts |
-|------|----------------------------|
-| code | e40, e91, e93, e113, e67 |
-| math | e99, e62, e22, e86, e16 |
-| language | e73, e110, e75, e6, e61 |
-| knowledge | e76, e119, e28, e109, e2 |
+![specialization](results/heatmap_specialization_LE.png)
 
 ---
 
 ## How it works
 
-Ollama runs MoE models through its bundled **llama.cpp / ggml**. Every expert
-gather is a `ggml_mul_mat_id` op whose `src[2]` is the per-token
-`selected_experts` tensor (int32, shape `[n_expert_used, n_tokens]`), with the
-layer encoded in its name `ffn_moe_topk-<il>`.
+### 1. The trace patch (`patches/expert-trace.patch`)
 
-`patches/expert-trace.patch` adds a function `ollama_trace_experts()` that appends
-one JSON line per op to the file named by `$OLLAMA_EXPERT_TRACE`:
+Ollama runs MoE models through bundled **llama.cpp / ggml**. The patch adds an
+opt-in hook (active only when `$OLLAMA_EXPERT_TRACE` is set) that records, per
+token:
 
-```json
-{"layer":12,"name":"ffn_moe_down-12","n_used":8,"n_tokens":1,"experts":[[40,91,7,...]]}
-```
+| what | where it's hooked | record |
+|------|-------------------|--------|
+| **selected experts** | `ggml_mul_mat_id` (both `ggml-cpu.c` *and* `repack.cpp`) | `{"layer":L,"name":"ffn_moe_down-L","experts":[[...]]}` |
+| **gating weights** | dispatcher post-op on `ffn_moe_weights` | `{"wlayer":L,"weights":[[...]]}` |
+| **ablation** | dispatcher pre-argsort on `ffn_moe_probs` | masks `$OLLAMA_ABLATE_EXPERTS` to −inf |
 
-It is a no-op when the env var is unset, so a patched build behaves identically to
-a stock build until you opt in.
+> **Two gotchas, both load-bearing:**
+> 1. ggml *repacks* quantized expert weights into a blocked layout with its
+>    **own** `mul_mat_id` kernel in `repack.cpp`. Hooking only `ggml-cpu.c`
+>    silently captures ~half the layers. The patch hooks both.
+> 2. A given expert index is **per-layer** — expert 40 in layer 3 is a different
+>    network from expert 40 in layer 20. All analysis keeps `(layer, expert)` as
+>    the unit and never sums an index across layers.
 
-> **Important:** ggml *repacks* quantized expert weights into a blocked layout
-> (`CPU_REPACK`) that has its **own** `mul_mat_id` kernel in `repack.cpp`, separate
-> from the generic one in `ggml-cpu.c`. The patch hooks **both** kernels. Hooking
-> only `ggml-cpu.c` silently captures ~half the layers and no gate/up ops — if you
-> see fewer layers than the model has, this is why.
-
-The Python harness (`harness/`, stdlib + `numpy` + `matplotlib` only):
+### 2. The harness (`harness/`)
 
 | script | role |
 |--------|------|
-| `fetch_benchmarks.py` | Pull 25 prompts/category from the HuggingFace datasets-server REST API (GSM8K, HumanEval, MMLU, opus-100 en→fr). Writes `benchmarks.json`. |
-| `run_trace.py` | Launch the patched server with `OLLAMA_EXPERT_TRACE` set and `OLLAMA_NUM_PARALLEL=1` (serialized requests), send each prompt, slice the trace file by byte offset to attribute lines to that request, aggregate per-request `(layer, expert)` counts → `activations.npz`. |
-| `analyze_heatmap.py` | Build the heatmaps + `category_expert_fraction.csv`. |
+| `fetch_benchmarks.py` | 25 prompts/category from HF datasets-server (GSM8K, HumanEval, MMLU, opus-100 en→fr) + gold answers + a neutral control set. |
+| `run_trace.py` | Drive the patched server (serialized, `think:false`), slice the trace by byte offset per request, pair experts with gating weights, **split prefill vs generation**, validate captured layers == `block_count`. → `activations.npz` |
+| `analyze_heatmap.py` | Per-task `(layer,expert)` specialization with **significance testing** + coverage metrics. |
+| `cluster_heatmap.py` | Hierarchically cluster specialized experts by task profile (the headline figure). |
+| `ablate_validate.py` | **Causal test**: ablate each task's top experts and measure task-specific accuracy loss. |
+
+### 3. Methodology (what makes the numbers trustworthy)
+
+- **Generation phase, not prefill.** Counts use the model's own generated tokens
+  by default (`MOE_PHASE=gen`), which removes most shared instruction-wrapper
+  bias that pollutes prompt tokens. Prefill is stored separately.
+- **Gate-weighted.** Each activation is weighted by its routing probability, not
+  a binary top-k membership (`MOE_WEIGHTED=1`).
+- **Pseudocount-smoothed.** Routing fractions use a Dirichlet pseudocount so
+  rarely-used experts can't produce explosive near-zero-baseline ratios.
+- **Significance-tested.** Per `(task, layer, expert)`, a Welch z-test of that
+  task's prompts vs. the rest, with **Benjamini-Hochberg FDR** control; heatmaps
+  are masked to significant cells.
+- **Neutral control.** A content-free category as a routing baseline.
+- **Causally validated** by ablation (below) — correlation alone isn't claimed.
 
 ---
 
@@ -67,65 +75,44 @@ The Python harness (`harness/`, stdlib + `numpy` + `matplotlib` only):
 
 ### 0. Prerequisites
 
-- Linux/macOS, **CPU is enough** (no GPU required; reference box was a 48-core
-  Xeon / 62 GB RAM, GPU unused).
-- **Go ≥ 1.26**, **CMake ≥ 3.24**, a C/C++ compiler (gcc/g++ or clang), **git**,
-  **Python 3.10+**.
-- ~30 GB free disk (ollama source + fetched llama.cpp + build + an ~18 GB model).
-- Internet access (clones, model pull, benchmark fetch).
-
-If Go/CMake aren't system-wide, install them into your home dir, e.g.:
+CPU is enough (no GPU). Need **Go ≥ 1.26**, **CMake ≥ 3.24**, a C/C++ compiler,
+**git**, **Python 3.10+**, ~30 GB disk, internet.
 
 ```bash
-# Go
-curl -sL https://go.dev/dl/go1.26.4.linux-amd64.tar.gz | tar -C $HOME/sdk -xz   # -> $HOME/sdk/go
-# CMake + Ninja via a venv (also used for numpy/matplotlib)
-python3 -m venv venv && ./venv/bin/pip install cmake ninja numpy matplotlib
+python3 -m venv venv && ./venv/bin/pip install cmake ninja numpy scipy matplotlib
 cp env.sh.example env.sh   # edit paths, then:  source env.sh
 ```
 
 ### 1. Build the patched Ollama
 
-The patch is generated against the llama.cpp revision Ollama **v0.30.5** pins
-(`b9509`). Ollama's build auto-applies any `*.patch` under `llama/compat/`.
+The patch targets the llama.cpp revision Ollama **v0.30.5** pins (`b9509`);
+Ollama auto-applies any `*.patch` under `llama/compat/`.
 
 ```bash
 git clone --depth 1 --branch v0.30.5 https://github.com/ollama/ollama.git ollama-src
 cp patches/expert-trace.patch ollama-src/llama/compat/
-cd ollama-src
-cmake -B build .                 # fetches llama.cpp b9509 and applies the patch
-cmake --build build --parallel   # builds ggml + llama runner + the ollama binary
-cd ..
-# -> patched binary at ollama-src/ollama
+cd ollama-src && cmake -B build . && cmake --build build --parallel && cd ..
 ```
 
-Using a **different Ollama version** pins a different llama.cpp, so the patch may
-not apply. If `cmake -B build` reports the patch failed, regenerate it (the change
-is small — two functions): clone the matching llama.cpp, add the
-`ollama_trace_experts` helper + call shown in `patches/expert-trace.patch` to both
-`ggml/src/ggml-cpu/ggml-cpu.c` (`ggml_compute_forward_mul_mat_id`) and
-`ggml/src/ggml-cpu/repack.cpp` (`forward_mul_mat_id`), then `git diff > patch`.
+A different Ollama version pins a different llama.cpp, so the patch may need
+regenerating (it touches two functions in `ggml-cpu.c` and one in `repack.cpp`).
 
-### 2. Pull the MoE model
+### 2. Pull a model
 
 ```bash
-ollama pull qwen3:30b-a3b      # ~18 GB; any MoE model works (see Customizing)
+ollama pull qwen3:30b-a3b      # ~18 GB; any MoE model works
 ```
 
-### 3. Trace and plot
+### 3. Trace, analyze, visualize, validate
 
 ```bash
-source env.sh
-cd harness
-./run_all.sh                   # fetch_benchmarks -> run_trace -> analyze_heatmap
-# or step by step:
-#   python fetch_benchmarks.py    # -> benchmarks.json
-#   python run_trace.py           # -> activations.npz
-#   python analyze_heatmap.py     # -> *.png + category_expert_fraction.csv
+source env.sh && cd harness
+python fetch_benchmarks.py     # benchmarks.json (+ gold answers, neutral set)
+python run_trace.py            # activations.npz  (~13 min for 110 prompts)
+python analyze_heatmap.py      # specialization heatmaps + significance + coverage
+python cluster_heatmap.py      # clustered headline figure
+python ablate_validate.py      # causal ablation (~18 min; restarts server x4)
 ```
-
-`run_trace.py` starts its own patched server on port 11435 (configurable) using
-your existing `~/.ollama` model store, so it won't clash with a running Ollama.
 
 ---
 
@@ -133,43 +120,58 @@ your existing `~/.ollama` model store, so it won't clash with a running Ollama.
 
 | file | meaning |
 |------|---------|
-| `heatmap_specialization.png` | `log2(category usage / overall usage)` per expert — the clearest "which experts map to which task". |
-| `heatmap_category_expert.png` | Raw expert-usage fraction per category. |
-| `heatmap_layers.png` | Per-category layer × expert routing grid. |
-| `category_expert_fraction.csv` | The underlying per-(category, expert) numbers. |
-| `activations.npz` | Per-request `(layer, expert)` count tensors for custom analysis. |
+| `heatmap_clustered.png` | specialized experts clustered into per-task blocks (headline). |
+| `heatmap_specialization_LE.png` | per-task `(layer × expert)` specialization, FDR-masked. |
+| `task_overlap.png` | Jaccard overlap of each task's preferred experts. |
+| `routing_entropy.png` | per-task per-layer routing concentration. |
+| `ablation_validation.png` | output divergence when ablating each task's experts, per prompt type. |
+| `specialization_significant.csv` | significant `(layer,expert)` cells per task. |
+| `activations.npz` | per-request gen/prefill, count/weighted tensors for custom analysis. |
+
+## Causal validation (ablation)
+
+`ablate_validate.py` forces a task's top-N experts out of routing (scores → −inf)
+and measures the **causal effect** as how much the model's greedy output changes.
+Generating full correct answers from a 30B reasoning model on CPU is too slow for
+a multi-condition sweep, so instead of accuracy we measure **output divergence**:
+generate a short deterministic continuation with vs. without ablation and compare
+them token-for-token.
+
+The claim being tested is **specificity** — ablating a task's experts should
+change *that task's* prompts far more than neutral/other-task prompts, and more
+than random ablation does (a hot diagonal once you subtract the random control):
+
+![ablation](results/ablation_validation.png)
+
+In the reference run, ablating a task's experts perturbs that task's outputs
+above the random-ablation baseline (knowledge +0.22, math +0.09, language +0.05),
+while off-diagonal effects are ~0 or negative — i.e. the specialization is
+causal and task-specific, strongly for math/knowledge and weakly for language.
 
 ## Customizing
 
-Environment knobs for `run_trace.py`:
-
-| var | default | meaning |
-|-----|---------|---------|
-| `MOE_MODEL` | `qwen3:30b-a3b` | any MoE model in your Ollama store (e.g. `gpt-oss:20b`, `granite3.1-moe:3b`) |
-| `MOE_NUM_PREDICT` | `96` | tokens generated per prompt |
-| `MOE_LIMIT` | `0` (all) | cap prompts per category (quick smoke runs) |
-| `MOE_PORT` | `11435` | server port |
-| `OLLAMA_BIN` | `ollama-src/ollama` | path to the patched binary |
-
-Edit the dataset → category mapping in `fetch_benchmarks.py` to trace other tasks.
+`run_trace.py` env: `MOE_MODEL`, `MOE_NUM_PREDICT`, `MOE_LIMIT`, `MOE_PORT`,
+`OLLAMA_BIN`. Analysis env: `MOE_PHASE` (gen|pre), `MOE_WEIGHTED`, `MOE_ALPHA`,
+`MOE_PSEUDOCOUNT`. Ablation env: `MOE_ABLATE_N`, `MOE_EVAL_N`, `MOE_EVAL_TOK`.
 
 ## Caveats
 
-- Reasoning models (qwen3) emit "thinking" tokens even for short answers, so the
-  routing reflects that token mix. To trace only task output, disable thinking
-  (`"think": false`) and/or separate prefill from generation.
-- Counts are over all tokens (prompt + generated). Per-token / per-position
-  breakdowns are available from `activations.npz` if you extend the analysis.
+- Routing reflects the *generated token mix*; with a reasoning model some
+  "thinking" style remains even at `think:false`.
+- Specialization is measured against the in-set baseline (the five categories);
+  adding very different tasks would shift it.
+- Causal validation uses output divergence rather than task accuracy (cheap
+  enough for a reasoning model on CPU); it shows the experts are *causally
+  influential and task-specific*, not the exact accuracy cost of removing them.
 
 ## Repo layout
 
 ```
-patches/expert-trace.patch   the ggml trace hook (apply during the Ollama build)
-harness/                     fetch / run / analyze scripts + run_all.sh
-results/                     example heatmaps + CSV from the reference run
+patches/expert-trace.patch   the ggml trace + weights + ablation hooks
+harness/                     fetch / run / analyze / cluster / ablate
+results/                     example figures from the reference run
 env.sh.example               toolchain PATH template
 ```
 
-The Ollama source tree, the llama.cpp reference clone, the venv, and generated
-artifacts are intentionally **not** committed (see `.gitignore`); they are
-recreated by the steps above.
+The Ollama tree, llama.cpp clone, venv, and generated artifacts are not
+committed (`.gitignore`); the steps above recreate them.

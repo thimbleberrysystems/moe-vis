@@ -1,0 +1,5 @@
+ablated,math,knowledge,language,neutral
+ablate math,0.3265,0.0551,0.2270,0.1872
+ablate knowledge,0.1625,0.2706,0.2844,0.1297
+ablate language,0.2348,0.0822,0.4502,0.4133
+ablate random,0.2330,0.0551,0.3961,0.4511
