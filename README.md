@@ -98,17 +98,30 @@ cp env.sh.example env.sh   # edit paths, then:  source env.sh
 
 ### 1. Build the patched Ollama
 
-The patch targets the llama.cpp revision Ollama **v0.30.5** pins (`b9509`);
-Ollama auto-applies any `*.patch` under `llama/compat/`.
+The patch is generated against an exact llama.cpp revision, so the build must use
+the matching pins. Ollama auto-applies any `*.patch` under `llama/compat/`.
+
+| component | pin |
+|-----------|-----|
+| ollama | tag `v0.30.5` = commit `3370ff8b1cda259b1b4cf947422a2faff7aaa58b` |
+| llama.cpp (fetched by the build) | `b9509` (ollama's `LLAMA_CPP_VERSION`) |
 
 ```bash
 git clone --depth 1 --branch v0.30.5 https://github.com/ollama/ollama.git ollama-src
+
+# verify the exact revisions the patch targets, else fail before the long build
+[ "$(git -C ollama-src rev-parse HEAD)" = 3370ff8b1cda259b1b4cf947422a2faff7aaa58b ] \
+  && grep -qx b9509 ollama-src/LLAMA_CPP_VERSION \
+  || { echo "version mismatch -- regenerate the patch for this ollama/llama.cpp"; exit 1; }
+
 cp patches/expert-trace.patch ollama-src/llama/compat/
 cd ollama-src && cmake -B build . && cmake --build build --parallel && cd ..
 ```
 
-A different Ollama version pins a different llama.cpp, so the patch may need
-regenerating (it touches two functions in `ggml-cpu.c` and one in `repack.cpp`).
+The patch targets two functions in `ggml/src/ggml-cpu/ggml-cpu.c` and one in
+`ggml/src/ggml-cpu/repack.cpp`. On a different llama.cpp revision `git apply` will
+reject it at the build's patch step (it won't misapply silently); regenerate the
+patch against that revision and retry.
 
 ### 2. Pull a model
 
