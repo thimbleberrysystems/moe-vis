@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Render the ablation figure from ablation_validation.csv (so it can be
-regenerated without re-running the model).
+"""Render the ablation figure as a grouped bar chart (no heatmap) from
+ablation_validation.csv, so it can be regenerated without re-running the model.
 
-Left panel  : raw output divergence, every condition incl. the random control.
-Right panel : divergence *above the random-ablation baseline* -- the clean
-              specificity view; a hot diagonal means each task's experts perturb
-              that task more than random experts do.
+For each prompt type (x groups) we draw one bar per ablation condition. The
+grey 'random' bar is the control; if specialization is causal, ablating a task's
+experts (the matching coloured bar) should exceed random on that task. Matching
+(task == prompt type) bars are outlined in black.
 """
 import csv
 import os
@@ -20,7 +20,7 @@ MODEL = os.environ.get("MOE_MODEL", "qwen3:30b-a3b")
 
 
 def load():
-    rows, conds = [], []
+    conds, rows = [], []
     with open(os.path.join(HERE, "ablation_validation.csv")) as f:
         r = csv.reader(f)
         sets = next(r)[1:]
@@ -30,40 +30,37 @@ def load():
 
 
 def plot(conds, sets, M):
-    rand_i = conds.index("ablate random") if "ablate random" in conds else -1
-    task_rows = [i for i in range(len(conds)) if i != rand_i]
-    fig, (axl, axr) = plt.subplots(1, 2, figsize=(15, 5))
+    # M[cond, set]; transpose to group by prompt type
+    colors = {"ablate math": "#d62728", "ablate knowledge": "#ff7f0e",
+              "ablate language": "#2ca02c", "ablate code": "#1f77b4",
+              "ablate random": "#9aa0aa"}
+    fig, ax = plt.subplots(figsize=(11, 5.5))
+    n = len(conds)
+    width = 0.8 / n
+    x = np.arange(len(sets))
+    for ci, cond in enumerate(conds):
+        vals = M[ci]
+        offs = x + (ci - (n - 1) / 2) * width
+        col = colors.get(cond, "#888888")
+        # outline the bar where the ablated task matches the prompt type
+        edges = ["k" if cond == f"ablate {s}" else "none" for s in sets]
+        lws = [2.0 if cond == f"ablate {s}" else 0 for s in sets]
+        ax.bar(offs, vals, width, label=cond, color=col,
+               edgecolor=edges, linewidth=lws, zorder=3)
 
-    im = axl.imshow(M, cmap="magma", aspect="auto")
-    axl.set_xticks(range(len(sets))); axl.set_xticklabels(sets)
-    axl.set_yticks(range(len(conds))); axl.set_yticklabels(conds)
-    axl.set_title("raw output divergence vs baseline\n(random row = control)")
-    axl.set_xlabel("prompt type")
-    for i in range(len(conds)):
-        for j in range(len(sets)):
-            axl.text(j, i, f"{M[i,j]:.2f}", ha="center", va="center",
-                     color="w" if M[i, j] < M.max() * 0.6 else "k", fontsize=9)
-    fig.colorbar(im, ax=axl, fraction=0.046, label="divergence")
-
-    if rand_i >= 0:
-        C = M[task_rows] - M[rand_i][None, :]
-        clabels = [conds[i] for i in task_rows]
-        v = float(np.abs(C).max()) or 1.0
-        im2 = axr.imshow(C, cmap="RdBu_r", vmin=-v, vmax=v, aspect="auto")
-        axr.set_xticks(range(len(sets))); axr.set_xticklabels(sets)
-        axr.set_yticks(range(len(clabels))); axr.set_yticklabels(clabels)
-        axr.set_title("divergence ABOVE random-ablation control\n"
-                      "(hot diagonal = task-specific causal effect)")
-        axr.set_xlabel("prompt type")
-        for i in range(len(clabels)):
-            for j in range(len(sets)):
-                axr.text(j, i, f"{C[i,j]:+.2f}", ha="center", va="center",
-                         color="k", fontsize=9)
-        fig.colorbar(im2, ax=axr, fraction=0.046, label="divergence − random")
-
-    fig.suptitle(f"{MODEL}: causal ablation of task-specialized experts")
+    ax.set_xticks(x); ax.set_xticklabels([f"{s}\nprompts" for s in sets])
+    ax.set_ylabel("output divergence from un-ablated baseline")
+    ax.set_title(f"{MODEL}: causal effect of ablating task-specialized experts\n"
+                 "black-outlined = ablating that task's own experts; grey = random control")
+    ax.legend(ncol=len(conds), fontsize=8, loc="upper center",
+              bbox_to_anchor=(0.5, -0.12), frameon=False)
+    ax.grid(axis="y", alpha=0.3, zorder=0)
+    ax.set_axisbelow(True)
+    for sp in ("top", "right"):
+        ax.spines[sp].set_visible(False)
     fig.tight_layout()
-    fig.savefig(os.path.join(HERE, "ablation_validation.png"), dpi=120)
+    fig.savefig(os.path.join(HERE, "ablation_validation.png"), dpi=130,
+                bbox_inches="tight")
     print("wrote ablation_validation.png")
 
 
