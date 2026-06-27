@@ -46,6 +46,24 @@ related tasks sit near each other. The clean separation is the finding; the
 
 ---
 
+## Quick start
+
+One idempotent script does everything — toolchain venv, build the patched ollama,
+pull the model, trace, render the Atlas, and run the ablation. Re-running skips
+finished stages.
+
+```bash
+./run.sh                      # full pipeline, default model (qwen3:30b-a3b)
+MODEL=gpt-oss:20b ./run.sh    # any MoE model — the patch is architecture-agnostic
+SKIP_ABLATE=1 ./run.sh        # skip the ~20 min causal ablation
+```
+
+You still need **Go ≥ 1.26**, **git**, and a **C/C++ compiler** on the system (the
+script bootstraps the Python venv + CMake itself). See [Reproduce](#reproduce) for
+the per-stage breakdown and requirements.
+
+---
+
 ## How it works
 
 ### 1. The trace patch (`patches/expert-trace.patch`)
@@ -66,6 +84,13 @@ token:
 >    silently captures ~half the layers. The patch hooks both.
 > 2. A given expert index is **per-layer** — analysis keeps `(layer, expert)` as
 >    the unit and never sums an index across layers.
+
+The hook targets llama.cpp's *shared* `build_moe_ffn` tensors, so it is
+**architecture-agnostic** — it works for any MoE model the llama.cpp engine runs
+(qwen3moe, Mixtral, DeepSeek-MoE, Granite-MoE, gpt-oss, OLMoE, …), selected with
+`MODEL=…`. What's pinned is the *llama.cpp revision* and *CPU execution*, not the
+model. (Models Ollama runs on its native Go engine — currently `gemma4`/`laguna` —
+are the exception.)
 
 ### 2. The harness (`harness/`)
 
@@ -150,12 +175,14 @@ ollama pull qwen3:30b-a3b      # ~18 GB; any MoE model works
 
 ### 3. Trace, map, validate
 
+`./run.sh` runs all of this; the per-stage equivalent is:
+
 ```bash
 source env.sh && cd harness
-python fetch_benchmarks.py     # benchmarks.json (+ gold answers, neutral set)
-python run_trace.py            # activations.npz  (~13 min for 110 prompts)
+python fetch_benchmarks.py     # benchmarks.json (15 categories, +gold, neutral)
+python run_trace.py            # activations.npz  (~20 min for 180 prompts)
 python expert_atlas.py         # expert_atlas.png — the headline map
-python ablate_validate.py      # causal ablation (~9 min; restarts server x4)
+python ablate_validate.py      # causal ablation (~20 min; restarts server per condition)
 ```
 
 `run_trace.py` starts its own patched server (port 11435) on your existing
@@ -218,8 +245,9 @@ routing statistics.
 ## Repo layout
 
 ```
+run.sh                       one-shot pipeline (build -> pull -> trace -> atlas -> ablate)
 patches/expert-trace.patch   the ggml trace + weights + ablation hooks
-harness/                     fetch / run / expert_atlas / ablate (+ plot_ablation)
+harness/                     fetch / run_trace / expert_atlas / ablate (+ plot_ablation)
 results/                     example Atlas + ablation figure from the reference run
 env.sh.example               toolchain PATH template
 ```
