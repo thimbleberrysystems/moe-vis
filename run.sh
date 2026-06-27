@@ -2,17 +2,18 @@
 # moe-vis — one-shot pipeline. Hit and run:
 #
 #   ./run.sh                      # full pipeline, default model (qwen3:30b-a3b)
-#   MODEL=gpt-oss:20b ./run.sh    # any MoE model that runs on the llama.cpp engine
+#   ./run.sh gpt-oss:20b          # any MoE model that runs on the llama.cpp engine
 #   SKIP_ABLATE=1 ./run.sh        # skip the (~20 min) causal ablation
 #
-# It is idempotent: each stage is skipped if already done, so re-running only
-# does the missing work. Stages: toolchain check -> venv -> build patched ollama
-# -> pull model -> fetch prompts -> trace -> Expert Atlas -> ablation.
+# The model is an optional first argument (defaults to qwen3:30b-a3b). The run is
+# idempotent: each stage is skipped if already done. Stages: toolchain check ->
+# venv -> build patched ollama -> pull model -> fetch -> trace -> Atlas -> ablate.
+# It opens the output graphs at the end.
 set -euo pipefail
 cd "$(dirname "$0")"
 ROOT="$(pwd)"
 
-MODEL="${MODEL:-qwen3:30b-a3b}"
+MODEL="${1:-${MODEL:-qwen3:30b-a3b}}"
 OLLAMA_TAG="v0.30.5"
 OLLAMA_SHA="3370ff8b1cda259b1b4cf947422a2faff7aaa58b"
 LLAMA_PIN="b9509"
@@ -82,6 +83,15 @@ if [ "${SKIP_ABLATE:-0}" != "1" ]; then
   python ablate_validate.py
 fi
 
-say done "outputs in harness/:"
-echo "  expert_atlas.png"
-[ "${SKIP_ABLATE:-0}" != "1" ] && echo "  ablation_validation.png"
+# --- show the output graphs --------------------------------------------------
+open_graph() {  # open in the platform image viewer, and always print the path
+  local f="$1"; [ -f "$f" ] || return 0
+  if   command -v xdg-open >/dev/null; then (xdg-open "$f" >/dev/null 2>&1 &)
+  elif command -v open     >/dev/null; then open "$f"
+  fi
+  echo "  $f"
+}
+
+say done "outputs:"
+open_graph "$ROOT/harness/expert_atlas.png"
+[ "${SKIP_ABLATE:-0}" != "1" ] && open_graph "$ROOT/harness/ablation_validation.png"

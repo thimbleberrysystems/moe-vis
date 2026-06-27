@@ -49,12 +49,12 @@ related tasks sit near each other. The clean separation is the finding; the
 ## Quick start
 
 One idempotent script does everything — toolchain venv, build the patched ollama,
-pull the model, trace, render the Atlas, and run the ablation. Re-running skips
-finished stages.
+pull the model, trace, render the Atlas, run the ablation, and open the resulting
+graphs. The model is an optional first argument. Re-running skips finished stages.
 
 ```bash
 ./run.sh                      # full pipeline, default model (qwen3:30b-a3b)
-MODEL=gpt-oss:20b ./run.sh    # any MoE model — the patch is architecture-agnostic
+./run.sh gpt-oss:20b          # any MoE model — the patch is architecture-agnostic
 SKIP_ABLATE=1 ./run.sh        # skip the ~20 min causal ablation
 ```
 
