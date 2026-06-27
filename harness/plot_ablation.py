@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Render the ablation figure as a grouped bar chart (no heatmap) from
+"""Render the ablation result as small multiples (no heatmap) from
 ablation_validation.csv, so it can be regenerated without re-running the model.
 
-For each prompt type (x groups) we draw one bar per ablation condition. The
-grey 'random' bar is the control; if specialization is causal, ablating a task's
-experts (the matching coloured bar) should exceed random on that task. Matching
-(task == prompt type) bars are outlined in black.
+One panel per ablation condition. Each panel bars the output divergence across
+the evaluated prompt sets; the set whose own experts were ablated is highlighted
+in red, and the grey random-ablation control is drawn as a black tick on each bar.
+If specialization is causal, the red bar clears its own tick.
 """
 import csv
+import math
 import os
 
 import numpy as np
@@ -30,37 +31,43 @@ def load():
 
 
 def plot(conds, sets, M):
-    # M[cond, set]; transpose to group by prompt type
-    colors = {"ablate math": "#d62728", "ablate knowledge": "#ff7f0e",
-              "ablate language": "#2ca02c", "ablate code": "#1f77b4",
-              "ablate random": "#9aa0aa"}
-    fig, ax = plt.subplots(figsize=(11, 5.5))
-    n = len(conds)
-    width = 0.8 / n
-    x = np.arange(len(sets))
-    for ci, cond in enumerate(conds):
-        vals = M[ci]
-        offs = x + (ci - (n - 1) / 2) * width
-        col = colors.get(cond, "#888888")
-        # outline the bar where the ablated task matches the prompt type
-        edges = ["k" if cond == f"ablate {s}" else "none" for s in sets]
-        lws = [2.0 if cond == f"ablate {s}" else 0 for s in sets]
-        ax.bar(offs, vals, width, label=cond, color=col,
-               edgecolor=edges, linewidth=lws, zorder=3)
+    rand_i = conds.index("ablate random") if "ablate random" in conds else None
+    rand = M[rand_i] if rand_i is not None else np.zeros(len(sets))
+    panels = [i for i in range(len(conds)) if i != rand_i]
 
-    ax.set_xticks(x); ax.set_xticklabels([f"{s}\nprompts" for s in sets])
-    ax.set_ylabel("output divergence from un-ablated baseline")
-    ax.set_title(f"{MODEL}: causal effect of ablating task-specialized experts\n"
-                 "black-outlined = ablating that task's own experts; grey = random control")
-    ax.legend(ncol=len(conds), fontsize=8, loc="upper center",
-              bbox_to_anchor=(0.5, -0.12), frameon=False)
-    ax.grid(axis="y", alpha=0.3, zorder=0)
-    ax.set_axisbelow(True)
-    for sp in ("top", "right"):
-        ax.spines[sp].set_visible(False)
-    fig.tight_layout()
-    fig.savefig(os.path.join(HERE, "ablation_validation.png"), dpi=130,
-                bbox_inches="tight")
+    ncols = min(3, len(panels))
+    nrows = math.ceil(len(panels) / ncols)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(4.2 * ncols, 3.0 * nrows),
+                             sharey=True, squeeze=False)
+    x = np.arange(len(sets))
+    short = [s.replace("_", "\n") for s in sets]
+    ymax = M.max() * 1.15
+
+    for k, ci in enumerate(panels):
+        ax = axes.flat[k]
+        cond = conds[ci]
+        target = cond.replace("ablate ", "")
+        vals = M[ci]
+        colors = ["#e23b3b" if s == target else "#4a6fa5" for s in sets]
+        ax.bar(x, vals, color=colors, zorder=3, width=0.7)
+        # random-ablation control = black tick across each bar
+        ax.hlines(rand, x - 0.35, x + 0.35, color="k", linewidth=1.6, zorder=5)
+        ax.set_title(cond, fontsize=10, fontweight="bold")
+        ax.set_xticks(x); ax.set_xticklabels(short, fontsize=6.5)
+        ax.set_ylim(0, ymax)
+        ax.grid(axis="y", alpha=0.25, zorder=0); ax.set_axisbelow(True)
+        for sp in ("top", "right"):
+            ax.spines[sp].set_visible(False)
+        if k % ncols == 0:
+            ax.set_ylabel("divergence vs baseline")
+    for k in range(len(panels), nrows * ncols):
+        axes.flat[k].axis("off")
+
+    fig.suptitle(f"{MODEL}: causal ablation — each panel ablates one task family's "
+                 f"experts\nred = that family's own prompts · black tick = random-"
+                 f"ablation control (red above tick ⇒ causal & specific)", fontsize=11)
+    fig.tight_layout(rect=(0, 0, 1, 0.94))
+    fig.savefig(os.path.join(HERE, "ablation_validation.png"), dpi=130)
     print("wrote ablation_validation.png")
 
 

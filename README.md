@@ -5,8 +5,9 @@ using a custom-patched [Ollama](https://ollama.com) build to trace expert routin
 — then map it as an **Expert Atlas** and **causally validate** it by ablation.
 
 Reference model: **`qwen3:30b-a3b`** (qwen3moe: 48 layers, 128 experts, top-8
-routing) on **CPU**, across five prompt categories (math, code, knowledge,
-language, and a content-free *neutral* control).
+routing) on **CPU**, across 15 fine-grained prompt categories grouped into 7 task
+families — math, code, science, humanities, social, language, and a content-free
+*neutral* control (e.g. `sci_physics`, `hum_law`, `lang_translate`).
 
 ## Headline: the Expert Atlas
 
@@ -23,21 +24,25 @@ language, and a content-free *neutral* control).
   (generation phase). t-SNE (cosine metric) projects those fingerprints to 2D, so
   **experts that fire on the same prompts land near each other.** Distances and
   clusters are meaningful; the absolute x/y axes are not (typical of t-SNE).
-- **Colour = the task the expert specializes for** — the task with the highest
-  `log2(task usage / overall usage)` for that expert.
-- **Grey = shared / core.** ~2,000 experts whose top specialization is weak: the
+- **Colour = the task the expert specializes for** (highest `log2(task usage /
+  overall usage)`), encoded hierarchically: each **family** gets a hue (math reds,
+  science greens, humanities purples, …) and each sub-task a **shade** of it — so
+  related tasks share a colour region. Family labels sit on each region; the
+  legend lists the 15 sub-tasks.
+- **Grey = shared / core** — experts whose top specialization is weak: the
   general-purpose backbone every task routes through.
 - **Size = specialization strength** (how far above baseline its preferred task
   routes to it).
 
 ### What it shows
 
-The model **self-organizes into task "continents"**: code (blue), knowledge
-(orange), math (red), language (green) and neutral (purple) occupy distinct
-regions, with a shared grey core in the middle. In other words qwen3-30b doesn't
-spread every task across all experts — it routes each task to a largely distinct,
-spatially-coherent sub-network, on top of a common core. The clean separation is
-the finding; the [ablation](#causal-validation-ablation) shows it's *causal*.
+The model **self-organizes into task "continents"** — each family occupies a
+distinct coloured region, with related sub-tasks (same hue, different shade)
+clustering together and a shared grey core in the middle. In other words
+qwen3-30b doesn't spread every task across all experts — it routes each task to a
+largely distinct, spatially-coherent sub-network on top of a common core, and
+related tasks sit near each other. The clean separation is the finding; the
+[ablation](#causal-validation-ablation) shows it's *causal*.
 
 ---
 
@@ -66,7 +71,7 @@ token:
 
 | script | role |
 |--------|------|
-| `fetch_benchmarks.py` | 25 prompts/category from HF datasets-server (GSM8K, HumanEval, MMLU, opus-100 en→fr) + gold answers + a neutral control set. |
+| `fetch_benchmarks.py` | ~12 prompts each for 15 fine-grained categories in 7 families (GSM8K, HumanEval, MBPP, MMLU subjects, opus-100, XSum) + a neutral control. Edit the `CATEGORIES` dict to change them; `family_member` naming drives the atlas colours. |
 | `run_trace.py` | Drive the patched server (serialized, `think:false`), slice the trace by byte offset per request, pair experts with gating weights, **split prefill vs generation**, validate captured layers == `block_count`. → `activations.npz` |
 | `expert_atlas.py` | Embed experts by co-activation similarity (t-SNE) → the Atlas. |
 | `ablate_validate.py` + `plot_ablation.py` | **Causal test**: ablate each task's top experts, measure task-specific output divergence. |
@@ -170,19 +175,19 @@ reasoning model on CPU is too slow for a 4-condition sweep, so we measure **outp
 divergence** — short deterministic continuations, with vs. without ablation —
 rather than accuracy.)
 
+It ablates one representative category per task family (plus a random control) and
+shows the result as **small multiples** — one panel per ablation. In each panel the
+**red bar** is that family's own prompts and the **black tick** is the random-
+ablation control on each bar. **Red above its tick ⇒ that family's experts causally
+and specifically matter** for that family's prompts.
+
 ![ablation](results/ablation_validation.png)
 
-For each prompt type, the **black-outlined bar** is "ablate that task's own
-experts" and the **grey bar** is the random-ablation control. If specialization is
-causal and specific, the outlined bar should beat random on its own task:
-
-- **math** prompts: ablating math experts → 0.33 vs 0.23 random ✓
-- **knowledge** prompts: 0.27 vs 0.06 random ✓ (strongest)
-- **language** prompts: 0.45 vs 0.40 random — weakly positive
-- **neutral** prompts: no owner; random is highest, as expected
-
-So the specialization is causal and task-specific — strongly for math/knowledge,
-weakly for language.
+In the reference run the red bar clears its random tick in **all six families** —
+dramatically for `sci_biology` (~0.68 vs ~0.10 random) and `math_algebra`
+(~0.20 vs ~0.03), more modestly for humanities/social/language — so the
+specialization is causal and task-specific across the board, not an artifact of
+routing statistics.
 
 ---
 
@@ -205,7 +210,7 @@ weakly for language.
 - Routing reflects the *generated token mix*; with a reasoning model some
   "thinking" style remains even at `think:false`.
 - t-SNE positions are relative — read clusters/neighbourhoods, not absolute axes.
-- Specialization is measured against the in-set baseline (the five categories).
+- Specialization is measured against the in-set baseline (the 15 categories).
 - Causal validation uses output divergence, not task accuracy: it shows the
   experts are *causally influential and task-specific*, not the exact accuracy
   cost of removing them.

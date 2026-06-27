@@ -1,5 +1,8 @@
-ablated,math,knowledge,language,neutral
-ablate math,0.3265,0.0551,0.2270,0.1872
-ablate knowledge,0.1625,0.2706,0.2844,0.1297
-ablate language,0.2348,0.0822,0.4502,0.4133
-ablate random,0.2330,0.0551,0.3961,0.4511
+ablated,code_mbpp,hum_history,lang_summarize,math_algebra,sci_biology,soc_econ,neutral
+ablate code_mbpp,0.3601,0.1537,0.3575,0.0273,0.3008,0.2227,0.3358
+ablate hum_history,0.0251,0.4573,0.3293,0.0000,0.3844,0.5426,0.1789
+ablate lang_summarize,0.0036,0.3652,0.3150,0.0099,0.3642,0.6030,0.3423
+ablate math_algebra,0.0707,0.2348,0.2621,0.2007,0.1993,0.3335,0.3003
+ablate sci_biology,0.0593,0.0417,0.2842,0.0118,0.6828,0.5478,0.2964
+ablate soc_econ,0.0520,0.2065,0.1610,0.0380,0.4004,0.5094,0.1935
+ablate random,0.1437,0.3822,0.2660,0.0272,0.1046,0.4495,0.4228
