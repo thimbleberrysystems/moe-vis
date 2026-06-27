@@ -10,14 +10,17 @@ language, and a content-free *neutral* control).
 
 ## Headline result
 
-Each significantly-specialized `(layer, expert)` expert, clustered by its
-across-task routing profile. Experts partition cleanly into per-task blocks
-(cluster purity ≈ 1.0) — red = task-preferred:
+**Expert Atlas** — every used `(layer, expert)` expert is one point, positioned
+by co-activation similarity (experts recruited on the *same prompts* sit together,
+via t-SNE) and colored by the task it specializes for. The model self-organizes
+into task "continents"; grey is the shared/core used by everything:
+
+![atlas](results/expert_atlas.png)
+
+The same structure as a clustered matrix (experts × tasks, cluster purity ≈ 1.0)
+and FDR-masked per-task `(layer × expert)` maps:
 
 ![clustered](results/heatmap_clustered.png)
-
-Per-task `(layer × expert)` specialization (FDR-masked) and task overlap:
-
 ![specialization](results/heatmap_specialization_LE.png)
 
 ---
@@ -51,7 +54,8 @@ token:
 | `fetch_benchmarks.py` | 25 prompts/category from HF datasets-server (GSM8K, HumanEval, MMLU, opus-100 en→fr) + gold answers + a neutral control set. |
 | `run_trace.py` | Drive the patched server (serialized, `think:false`), slice the trace by byte offset per request, pair experts with gating weights, **split prefill vs generation**, validate captured layers == `block_count`. → `activations.npz` |
 | `analyze_heatmap.py` | Per-task `(layer,expert)` specialization with **significance testing** + coverage metrics. |
-| `cluster_heatmap.py` | Hierarchically cluster specialized experts by task profile (the headline figure). |
+| `cluster_heatmap.py` | Hierarchically cluster specialized experts by task profile. |
+| `expert_atlas.py` | t-SNE map of experts by co-activation similarity — the headline figure. |
 | `ablate_validate.py` | **Causal test**: ablate each task's top experts and measure task-specific accuracy loss. |
 
 ### 3. Methodology (what makes the numbers trustworthy)
@@ -79,7 +83,7 @@ CPU is enough (no GPU). Need **Go ≥ 1.26**, **CMake ≥ 3.24**, a C/C++ compil
 **git**, **Python 3.10+**, ~30 GB disk, internet.
 
 ```bash
-python3 -m venv venv && ./venv/bin/pip install cmake ninja numpy scipy matplotlib
+python3 -m venv venv && ./venv/bin/pip install cmake ninja numpy scipy scikit-learn matplotlib
 cp env.sh.example env.sh   # edit paths, then:  source env.sh
 ```
 
@@ -110,8 +114,9 @@ source env.sh && cd harness
 python fetch_benchmarks.py     # benchmarks.json (+ gold answers, neutral set)
 python run_trace.py            # activations.npz  (~13 min for 110 prompts)
 python analyze_heatmap.py      # specialization heatmaps + significance + coverage
-python cluster_heatmap.py      # clustered headline figure
-python ablate_validate.py      # causal ablation (~18 min; restarts server x4)
+python expert_atlas.py         # headline: expert co-activation map (t-SNE)
+python cluster_heatmap.py      # clustered experts-x-tasks matrix
+python ablate_validate.py      # causal ablation (~9 min; restarts server x4)
 ```
 
 ---
@@ -120,7 +125,8 @@ python ablate_validate.py      # causal ablation (~18 min; restarts server x4)
 
 | file | meaning |
 |------|---------|
-| `heatmap_clustered.png` | specialized experts clustered into per-task blocks (headline). |
+| `expert_atlas.png` | t-SNE map of experts by co-activation; task continents (headline). |
+| `heatmap_clustered.png` | specialized experts clustered into per-task blocks. |
 | `heatmap_specialization_LE.png` | per-task `(layer × expert)` specialization, FDR-masked. |
 | `task_overlap.png` | Jaccard overlap of each task's preferred experts. |
 | `routing_entropy.png` | per-task per-layer routing concentration. |
