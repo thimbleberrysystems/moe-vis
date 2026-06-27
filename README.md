@@ -58,9 +58,11 @@ graphs. The model is an optional first argument. Re-running skips finished stage
 SKIP_ABLATE=1 ./run.sh        # skip the ~20 min causal ablation
 ```
 
-You still need **Go ≥ 1.26**, **git**, and a **C/C++ compiler** on the system (the
-script bootstraps the Python venv + CMake itself). See [Reproduce](#reproduce) for
-the per-stage breakdown and requirements.
+You only need **git**, a **C/C++ compiler** (gcc or clang), and **python3** on the
+system. The script bootstraps everything else itself — Go (into `~/sdk`, no sudo),
+CMake/Ninja and the Python libs (into a local `venv`), the patched ollama +
+llama.cpp source, and the model. Nothing is installed system-wide. See
+[Reproduce](#reproduce) for the per-stage breakdown.
 
 ---
 

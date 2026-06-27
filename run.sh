@@ -6,9 +6,14 @@
 #   SKIP_ABLATE=1 ./run.sh        # skip the (~20 min) causal ablation
 #
 # The model is an optional first argument (defaults to qwen3:30b-a3b). The run is
-# idempotent: each stage is skipped if already done. Stages: toolchain check ->
-# venv -> build patched ollama -> pull model -> fetch -> trace -> Atlas -> ablate.
-# It opens the output graphs at the end.
+# idempotent: each stage is skipped if already done, and it opens the output
+# graphs at the end. Stages: tools -> Go -> venv -> build patched ollama -> pull
+# model -> fetch -> trace -> Atlas -> ablate.
+#
+# Prerequisites it does NOT install (needs a package manager / sudo): git, a
+# C/C++ compiler (gcc or clang), and python3 with venv. Everything else — Go,
+# CMake, Ninja, the Python libs, ollama+llama.cpp source, and the model — it
+# downloads/builds itself, none of it system-wide (Go -> ~/sdk, the rest local).
 set -euo pipefail
 cd "$(dirname "$0")"
 ROOT="$(pwd)"
@@ -21,14 +26,37 @@ PORT_PULL="127.0.0.1:11439"
 
 say() { printf '\n\033[1;36m[%s]\033[0m %s\n' "$1" "$2"; }
 
-# --- toolchain ---------------------------------------------------------------
+# --- base tools we can't install without sudo (fail clearly if missing) ------
+command -v git    >/dev/null || { echo "ERROR: need 'git' installed"; exit 1; }
+command -v curl   >/dev/null || { echo "ERROR: need 'curl' installed"; exit 1; }
+command -v python3>/dev/null || { echo "ERROR: need 'python3' (with venv support)"; exit 1; }
+command -v cc >/dev/null || command -v gcc >/dev/null || command -v clang >/dev/null \
+  || { echo "ERROR: need a C/C++ compiler (gcc or clang)"; exit 1; }
+if command -v gcc >/dev/null && command -v g++ >/dev/null; then
+  export CC="${CC:-gcc}" CXX="${CXX:-g++}"          # else let cmake autodetect (e.g. clang)
+fi
+
+# --- Go >= 1.26: use an existing install, else fetch it to ~/sdk (no sudo) ----
 if ! command -v go >/dev/null; then
   for d in "$HOME"/sdk/go*/bin /usr/local/go/bin; do [ -d "$d" ] && PATH="$d:$PATH"; done
 fi
-command -v go >/dev/null || { echo "ERROR: need Go >= 1.26 on PATH (https://go.dev/dl)"; exit 1; }
-command -v git >/dev/null || { echo "ERROR: need git"; exit 1; }
-command -v gcc >/dev/null || command -v cc >/dev/null || { echo "ERROR: need a C/C++ compiler"; exit 1; }
-export CC="${CC:-gcc}" CXX="${CXX:-g++}"
+if ! command -v go >/dev/null; then
+  GO_VERSION="${GO_VERSION:-1.26.4}"
+  os="$(uname -s | tr '[:upper:]' '[:lower:]')"     # linux | darwin
+  arch="$(uname -m)"
+  case "$arch" in
+    x86_64|amd64)  arch=amd64 ;;
+    aarch64|arm64) arch=arm64 ;;
+    *) echo "ERROR: unsupported arch '$arch'; install Go >= 1.26 manually"; exit 1 ;;
+  esac
+  say setup "installing Go $GO_VERSION into ~/sdk (no sudo) for the ollama build"
+  mkdir -p "$HOME/sdk"; tmp="$(mktemp -d)"
+  curl -fSL "https://go.dev/dl/go${GO_VERSION}.${os}-${arch}.tar.gz" -o "$tmp/go.tgz"
+  tar -C "$tmp" -xzf "$tmp/go.tgz"
+  rm -rf "$HOME/sdk/go${GO_VERSION}"; mv "$tmp/go" "$HOME/sdk/go${GO_VERSION}"; rm -rf "$tmp"
+  PATH="$HOME/sdk/go${GO_VERSION}/bin:$PATH"
+fi
+command -v go >/dev/null || { echo "ERROR: Go bootstrap failed"; exit 1; }
 
 # --- python venv (also provides cmake + ninja) -------------------------------
 if [ ! -x venv/bin/python ]; then
