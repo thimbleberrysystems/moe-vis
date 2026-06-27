@@ -90,9 +90,11 @@ token:
 The hook targets llama.cpp's *shared* `build_moe_ffn` tensors, so it is
 **architecture-agnostic** — it works for any MoE model the llama.cpp engine runs
 (qwen3moe, Mixtral, DeepSeek-MoE, Granite-MoE, gpt-oss, OLMoE, …), selected with
-`MODEL=…`. What's pinned is the *llama.cpp revision* and *CPU execution*, not the
-model. (Models Ollama runs on its native Go engine — currently `gemma4`/`laguna` —
-are the exception.)
+`MODEL=…`. Validated end-to-end with **no code changes** on qwen3moe (128 experts,
+top-8) and **Mixtral-8x7b** (`llama` arch, 8 experts, top-2): the harness reads
+each model's dims generically and captured all layers in both. What's pinned is
+the *llama.cpp revision* and *CPU execution*, not the model. (Models Ollama runs
+on its native Go engine — currently `gemma4`/`laguna` — are the exception.)
 
 ### 2. The harness (`harness/`)
 
